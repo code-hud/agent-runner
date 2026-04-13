@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   run:
-    uses: code-hud/agent-runner/agent-runner.yml@v1
+    uses: code-hud/agent-runner/.github/workflows/agent-runner.yml@v1
     secrets:
       hud-api-token: ${{ secrets.HUD_API_TOKEN }}
       anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
