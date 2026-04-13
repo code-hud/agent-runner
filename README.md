@@ -7,7 +7,7 @@ A reusable GitHub Actions workflow that polls Hud Workflow Manager for pending t
 Create a workflow file in your repository (e.g. `.github/workflows/agent-runner.yaml`):
 
 ```yaml
-name: Agent Runner
+name: Hud Agent Runner
 
 on:
   schedule:

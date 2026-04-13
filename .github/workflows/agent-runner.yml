@@ -1,4 +1,4 @@
-name: Agent Runner
+name: Hud Agent Runner
 
 on:
   workflow_call:
