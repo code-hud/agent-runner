@@ -2,6 +2,12 @@ name: Agent Runner
 
 on:
   workflow_call:
+    inputs:
+      base-url:
+        description: 'Base URL of the Hud API'
+        required: false
+        type: string
+        default: 'https://api-prod.hud.io'
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
@@ -38,7 +44,7 @@ jobs:
         run: |
           RESPONSE=$(curl -s -f \
             -H "Authorization: Bearer ${{ secrets.hud-api-token }}" \
-            "https://api-prod.hud.io/workflow-manager/tasks/pending?limit=10")
+            "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10")
 
           TASK_COUNT=$(echo "$RESPONSE" | jq '. | length')
           echo "tasks=$(echo "$RESPONSE" | jq -c '.')" >> "$GITHUB_OUTPUT"
@@ -87,6 +93,7 @@ jobs:
           HUD_PROMPT: ${{ matrix.task.prompt }}
           HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
           HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
+          HUD_MCP_BASE_URL: ${{ inputs.base-url }}
           HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
           HUD_MODEL: ${{ matrix.task.model }}
 
@@ -129,4 +136,4 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.hud-api-token }}" \
             -H "Content-Type: application/json" \
             -d "$RESULT" \
-            "https://api-prod.hud.io/workflow-manager/tasks/${{ matrix.task.id }}/update"
+            "${{ inputs.base-url }}/workflow-manager/tasks/${{ matrix.task.id }}/update"
