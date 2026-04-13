@@ -82,6 +82,10 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install agent dependencies
+        working-directory: .agent-runner
+        run: npm install --ignore-scripts
+
       - name: Run agent
         if: matrix.task.type == 'agent'
         id: agent

@@ -1,0 +1,7 @@
+{
+  "name": "hud-agent-runner",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.79"
+  }
+}
