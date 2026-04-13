@@ -1,0 +1,132 @@
+name: Agent Runner
+
+on:
+  workflow_call:
+    outputs:
+      has_tasks:
+        description: 'Whether pending tasks were found in this run'
+        value: ${{ jobs.fetch-tasks.outputs.has_tasks }}
+    secrets:
+      hud-api-token:
+        description: 'Auth token for the Workflow Manager'
+        required: true
+      anthropic-api-key:
+        description: 'Anthropic API key'
+        required: true
+      hud-mcp-key:
+        description: 'Hud MCP key'
+        required: true
+      github-token:
+        description: 'GitHub token with repo write access for branch/PR operations'
+        required: true
+
+# NOTE: Continuation logic (self-dispatch, concurrency group) lives in the
+# caller workflow rather than here. We considered moving it into this reusable
+# workflow to keep the caller minimal, but that would require passing a token
+# with `actions: write` permission into an agentic workflow — a security risk
+# since the agent steps could use that token to trigger arbitrary workflow runs.
+
+jobs:
+  fetch-tasks:
+    runs-on: ubuntu-latest
+    outputs:
+      tasks: ${{ steps.fetch.outputs.tasks }}
+      has_tasks: ${{ steps.fetch.outputs.has_tasks }}
+    steps:
+      - name: Fetch pending tasks
+        id: fetch
+        run: |
+          RESPONSE=$(curl -s -f \
+            -H "Authorization: Bearer ${{ secrets.hud-api-token }}" \
+            "https://api-prod.hud.io/workflow-manager/tasks/pending?limit=10")
+
+          TASK_COUNT=$(echo "$RESPONSE" | jq '. | length')
+          echo "tasks=$(echo "$RESPONSE" | jq -c '.')" >> "$GITHUB_OUTPUT"
+          echo "has_tasks=$([ "$TASK_COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  execute-task:
+    needs: fetch-tasks
+    if: needs.fetch-tasks.outputs.has_tasks == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        task: ${{ fromJSON(needs.fetch-tasks.outputs.tasks) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.github-token }}
+
+      - name: Setup branch
+        if: matrix.task.branch
+        run: |
+          git config user.name "hud-bot"
+          git config user.email "bot@hud.io"
+          if [ -n "${{ matrix.task.baseBranch }}" ]; then
+            git checkout "${{ matrix.task.baseBranch }}"
+            git checkout -b "${{ matrix.task.branch }}"
+          else
+            git fetch origin "${{ matrix.task.branch }}"
+            git checkout "${{ matrix.task.branch }}"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: code-hud/agent-runner
+          path: .agent-runner
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run agent
+        if: matrix.task.type == 'agent'
+        id: agent
+        run: node .agent-runner/agent.js
+        env:
+          HUD_PROMPT: ${{ matrix.task.prompt }}
+          HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
+          HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
+          HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
+          HUD_MODEL: ${{ matrix.task.model }}
+
+      - name: Commit and push
+        if: matrix.task.type == 'agent' && matrix.task.branch
+        run: |
+          git config user.name "hud-bot"
+          git config user.email "bot@hud.io"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "workflow step ${{ matrix.task.step_index }}"
+          git push origin "${{ matrix.task.branch }}"
+
+      - name: Create PR
+        if: matrix.task.type == 'create_pr'
+        id: create_pr
+        run: |
+          PR_URL=$(gh pr create \
+            --head "${{ matrix.task.branch }}" \
+            --title "${{ matrix.task.title }}" \
+            --body "${{ matrix.task.body }}")
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+
+      - name: Report task result
+        if: always()
+        env:
+          AGENT_RESULT: ${{ steps.agent.outputs.result }}
+        run: |
+          if [ "${{ matrix.task.type }}" = "create_pr" ]; then
+            PR_URL="${{ steps.create_pr.outputs.pr_url }}"
+            RESULT="{\"status\":\"finish\",\"result\":{\"pr_url\":\"$PR_URL\"}}"
+          elif [ -n "$AGENT_RESULT" ]; then
+            RESULT="$AGENT_RESULT"
+          else
+            RESULT='{"status":"crash"}'
+          fi
+          curl -s -f -X POST \
+            -H "Authorization: Bearer ${{ secrets.hud-api-token }}" \
+            -H "Content-Type: application/json" \
+            -d "$RESULT" \
+            "https://api-prod.hud.io/workflow-manager/tasks/${{ matrix.task.id }}/update"
