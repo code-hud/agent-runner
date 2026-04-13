@@ -63,19 +63,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.github-token }}
+          ref: ${{ matrix.task.baseBranch || matrix.task.branch || '' }}
 
-      - name: Setup branch
-        if: matrix.task.branch
+      - name: Configure git
         run: |
           git config user.name "hud-bot"
           git config user.email "bot@hud.io"
-          if [ -n "${{ matrix.task.baseBranch }}" ]; then
-            git checkout "${{ matrix.task.baseBranch }}"
-            git checkout -b "${{ matrix.task.branch }}"
-          else
-            git fetch origin "${{ matrix.task.branch }}"
-            git checkout "${{ matrix.task.branch }}"
-          fi
+
+      - name: Create feature branch
+        if: matrix.task.branch && matrix.task.baseBranch
+        run: git checkout -b "${{ matrix.task.branch }}"
 
       - uses: actions/checkout@v4
         with:
@@ -100,8 +97,6 @@ jobs:
       - name: Commit and push
         if: matrix.task.type == 'agent' && matrix.task.branch
         run: |
-          git config user.name "hud-bot"
-          git config user.email "bot@hud.io"
           git add -A
           git diff --cached --quiet && exit 0
           git commit -m "workflow step ${{ matrix.task.step_index }}"
