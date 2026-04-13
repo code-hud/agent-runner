@@ -72,7 +72,9 @@ jobs:
 
       - name: Create feature branch
         if: matrix.task.branch && matrix.task.baseBranch
-        run: git checkout -b "${{ matrix.task.branch }}"
+        run: |
+          git checkout -b "${{ matrix.task.branch }}"
+          git push -u origin "${{ matrix.task.branch }}"
 
       - uses: actions/checkout@v4
         with:
