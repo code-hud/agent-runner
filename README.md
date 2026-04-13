@@ -20,7 +20,7 @@ on:
         default: '10'
 
 concurrency:
-  group: agent-runner
+  group: hud-agent-runner
   cancel-in-progress: false
 
 permissions:
