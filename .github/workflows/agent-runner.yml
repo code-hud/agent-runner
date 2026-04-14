@@ -109,8 +109,9 @@ jobs:
         if: matrix.task.type == 'agent' && matrix.task.branch
         run: |
           git add -A -- ':!.agent-runner'
-          git diff --cached --quiet && exit 0
-          git commit -m "workflow step ${{ matrix.task.step_index }}"
+          if ! git diff --cached --quiet; then
+            git commit -m "workflow step ${{ matrix.task.step_index }}"
+          fi
           git push origin "${{ matrix.task.branch }}"
 
       - name: Create PR
