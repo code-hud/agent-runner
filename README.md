@@ -23,13 +23,11 @@ concurrency:
   group: hud-agent-runner
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  pull-requests: write
-  actions: write
-
 jobs:
   run:
+    permissions:
+      contents: write
+      pull-requests: write
     uses: code-hud/agent-runner/.github/workflows/agent-runner.yml@v1
     secrets:
       hud-api-token: ${{ secrets.HUD_API_TOKEN }}
@@ -38,6 +36,8 @@ jobs:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
   continue:
+    permissions:
+      actions: write
     needs: run
     if: needs.run.outputs.has_tasks == 'true'
     runs-on: ubuntu-latest

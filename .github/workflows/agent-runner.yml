@@ -4,10 +4,15 @@ on:
   workflow_call:
     inputs:
       base-url:
-        description: 'Base URL of the Hud API'
+        description: 'Base URL of the Hud API (used for action API calls; also used for MCP if mcp-base-url is not set)'
         required: false
         type: string
         default: 'https://api-prod.hud.io'
+      mcp-base-url:
+        description: 'Base URL for the Hud MCP server. Falls back to base-url when omitted.'
+        required: false
+        type: string
+        default: ''
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
@@ -96,7 +101,7 @@ jobs:
           HUD_PROMPT: ${{ matrix.task.prompt }}
           HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
           HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
-          HUD_MCP_BASE_URL: ${{ inputs.base-url }}
+          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
           HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
           HUD_MODEL: ${{ matrix.task.model }}
 
