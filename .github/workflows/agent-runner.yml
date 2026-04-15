@@ -30,6 +30,12 @@ on:
       github-token:
         description: 'GitHub token with repo write access for branch/PR operations'
         required: true
+      langfuse-secret-key:
+        description: 'Langfuse secret key for tracing (optional)'
+        required: false
+      langfuse-public-key:
+        description: 'Langfuse public key for tracing (optional)'
+        required: false
 
 # NOTE: Continuation logic (self-dispatch, concurrency group) lives in the
 # caller workflow rather than here. We considered moving it into this reusable
@@ -104,6 +110,9 @@ jobs:
           HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
           HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
           HUD_MODEL: ${{ matrix.task.model }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.langfuse-secret-key }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.langfuse-public-key }}
+          LANGFUSE_BASE_URL: 'https://cloud.langfuse.com'
 
       - name: Commit and push
         if: matrix.task.type == 'agent' && matrix.task.branch
