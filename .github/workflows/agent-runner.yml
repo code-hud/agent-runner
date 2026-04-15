@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: ''
+      mcp-runner:
+        description: 'Command to launch MCP packages: npx or bunx'
+        required: false
+        type: string
+        default: 'npx'
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
@@ -99,6 +104,10 @@ jobs:
         working-directory: .agent-runner
         run: npm install --ignore-scripts
 
+      - name: Install Bun
+        if: inputs.mcp-runner == 'bunx'
+        uses: oven-sh/setup-bun@v2
+
       - name: Run agent
         if: matrix.task.type == 'agent'
         id: agent
@@ -108,6 +117,7 @@ jobs:
           HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
           HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
           HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
+          HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
           HUD_MODEL: ${{ matrix.task.model }}
           LANGFUSE_SECRET_KEY: ${{ secrets.langfuse-secret-key }}
