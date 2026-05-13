@@ -2,6 +2,11 @@
 
 A reusable GitHub Actions workflow that polls Hud Workflow Manager for pending tasks, executes them in parallel using claude agent sdk, and reports results back.
 
+## Authentication
+
+The runner authenticates to Hud via **GitHub OIDC**
+The calling job must grant `permissions: id-token: write`
+
 ## Quick Start
 
 Create a workflow file in your repository (e.g. `.github/workflows/hud-agent-runner.yaml`):
@@ -26,13 +31,12 @@ concurrency:
 jobs:
   run:
     permissions:
+      id-token: write # required for GitHub OIDC → Hud token exchange
       contents: write
       pull-requests: write
     uses: code-hud/agent-runner/.github/workflows/agent-runner.yml@v1
     secrets:
-      hud-api-token: ${{ secrets.HUD_API_TOKEN }}
       anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-      hud-mcp-key: ${{ secrets.HUD_MCP_KEY }}
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
   continue:

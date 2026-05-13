@@ -18,19 +18,18 @@ on:
         required: false
         type: string
         default: 'npx'
+      hud-audience:
+        description: 'OIDC audience for the GitHub→Hud token exchange.'
+        required: false
+        type: string
+        default: ''
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
         value: ${{ jobs.fetch-tasks.outputs.has_tasks }}
     secrets:
-      hud-api-token:
-        description: 'Auth token for the Workflow Manager'
-        required: true
       anthropic-api-key:
         description: 'Anthropic API key'
-        required: true
-      hud-mcp-key:
-        description: 'Hud MCP key'
         required: true
       github-token:
         description: 'GitHub token with repo write access for branch/PR operations'
@@ -42,6 +41,10 @@ on:
         description: 'Langfuse public key for tracing (optional)'
         required: false
 
+# Authentication: every job here uses GitHub OIDC to obtain short-lived Hud
+# Auth0 tokens. There is no static-secret fallback: callers must grant
+# `permissions: id-token: write` on the calling job.
+#
 # NOTE: Continuation logic (self-dispatch, concurrency group) lives in the
 # caller workflow rather than here. We considered moving it into this reusable
 # workflow to keep the caller minimal, but that would require passing a token
@@ -51,15 +54,35 @@ on:
 jobs:
   fetch-tasks:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       tasks: ${{ steps.fetch.outputs.tasks }}
       has_tasks: ${{ steps.fetch.outputs.has_tasks }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: code-hud/agent-runner
+          path: .agent-runner
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve Hud tokens (GitHub OIDC)
+        id: hud-tokens
+        run: node .agent-runner/fetch-tokens.js
+        env:
+          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_AUDIENCE: ${{ inputs.hud-audience }}
+
       - name: Fetch pending tasks
         id: fetch
+        env:
+          HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
         run: |
           RESPONSE=$(curl -s -f \
-            -H "Authorization: Bearer ${{ secrets.hud-api-token }}" \
+            -H "Authorization: Bearer $HUD_TOKEN" \
             "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10")
 
           TASK_COUNT=$(echo "$RESPONSE" | jq '. | length')
@@ -70,6 +93,10 @@ jobs:
     needs: fetch-tasks
     if: needs.fetch-tasks.outputs.has_tasks == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
     strategy:
       fail-fast: false
       max-parallel: 5
@@ -108,6 +135,13 @@ jobs:
         if: inputs.mcp-runner == 'bunx'
         uses: oven-sh/setup-bun@v2
 
+      - name: Resolve Hud tokens (GitHub OIDC)
+        id: hud-tokens
+        run: node .agent-runner/fetch-tokens.js
+        env:
+          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_AUDIENCE: ${{ inputs.hud-audience }}
+
       - name: Run agent
         if: matrix.task.type == 'agent'
         id: agent
@@ -115,7 +149,7 @@ jobs:
         env:
           HUD_PROMPT: ${{ matrix.task.prompt }}
           HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
-          HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
+          HUD_ACCESS_TOKEN: ${{ steps.hud-tokens.outputs.general_token }}
           HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
           HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
@@ -149,6 +183,7 @@ jobs:
         if: always()
         env:
           AGENT_RESULT: ${{ steps.agent.outputs.result }}
+          HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
         run: |
           if [ "${{ matrix.task.type }}" = "create_pr" ]; then
             PR_URL="${{ steps.create_pr.outputs.pr_url }}"
@@ -159,7 +194,7 @@ jobs:
             RESULT='{"status":"crash"}'
           fi
           curl -s -f -X POST \
-            -H "Authorization: Bearer ${{ secrets.hud-api-token }}" \
+            -H "Authorization: Bearer $HUD_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$RESULT" \
             "${{ inputs.base-url }}/workflow-manager/tasks/${{ matrix.task.id }}/update"
