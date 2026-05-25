@@ -1,0 +1,225 @@
+name: Hud Agent Runner
+
+on:
+  workflow_call:
+    inputs:
+      base-url:
+        description: 'Base URL of the Hud API (used for action API calls; also used for MCP if mcp-base-url is not set)'
+        required: false
+        type: string
+        default: 'https://api-prod.hud.io'
+      mcp-base-url:
+        description: 'Base URL for the Hud MCP server. Falls back to base-url when omitted.'
+        required: false
+        type: string
+        default: ''
+      mcp-runner:
+        description: 'Command to launch MCP packages: npx or bunx'
+        required: false
+        type: string
+        default: 'npx'
+      mcp-version:
+        description: 'Version (npm dist-tag or version) of hud-mcp to install, e.g. v2 or 1.2.3'
+        required: false
+        type: string
+        default: 'v2'
+      hud-audience:
+        description: 'OIDC audience for the GitHub→Hud token exchange.'
+        required: false
+        type: string
+        default: ''
+      extra-env:
+        description: |
+          Comma-separated list of additional process.env keys to forward into
+          the Claude Code subprocess on top of the built-in allowlist (PATH,
+          HOME, TMPDIR, USER, SHELL, TERM).
+        required: false
+        type: string
+        default: ''
+    outputs:
+      has_tasks:
+        description: 'Whether pending tasks were found in this run'
+        value: ${{ jobs.fetch-tasks.outputs.has_tasks }}
+    secrets:
+      anthropic-api-key:
+        description: 'Anthropic API key'
+        required: true
+      github-token:
+        description: 'GitHub token with repo write access for branch/PR operations'
+        required: true
+      langfuse-secret-key:
+        description: 'Langfuse secret key for tracing (optional)'
+        required: false
+      langfuse-public-key:
+        description: 'Langfuse public key for tracing (optional)'
+        required: false
+
+# Authentication: every job here uses GitHub OIDC to obtain short-lived Hud
+# Auth0 tokens. There is no static-secret fallback: callers must grant
+# `permissions: id-token: write` on the calling job.
+#
+# NOTE: Continuation logic (self-dispatch, concurrency group) lives in the
+# caller workflow rather than here. We considered moving it into this reusable
+# workflow to keep the caller minimal, but that would require passing a token
+# with `actions: write` permission into an agentic workflow — a security risk
+# since the agent steps could use that token to trigger arbitrary workflow runs.
+
+jobs:
+  fetch-tasks:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      tasks: ${{ steps.fetch.outputs.tasks }}
+      has_tasks: ${{ steps.fetch.outputs.has_tasks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: code-hud/agent-runner
+          path: .agent-runner
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve Hud tokens (GitHub OIDC)
+        id: hud-tokens
+        run: node .agent-runner/fetch-tokens.js
+        env:
+          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_AUDIENCE: ${{ inputs.hud-audience }}
+
+      - name: Fetch pending tasks
+        id: fetch
+        env:
+          HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
+        run: |
+          RESPONSE=$(curl -s -f \
+            -H "Authorization: Bearer $HUD_TOKEN" \
+            "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10")
+
+          TASK_COUNT=$(echo "$RESPONSE" | jq '. | length')
+          echo "tasks=$(echo "$RESPONSE" | jq -c '.')" >> "$GITHUB_OUTPUT"
+          echo "has_tasks=$([ "$TASK_COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  execute-task:
+    needs: fetch-tasks
+    if: needs.fetch-tasks.outputs.has_tasks == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        task: ${{ fromJSON(needs.fetch-tasks.outputs.tasks) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.github-token }}
+          ref: ${{ matrix.task.baseBranch || matrix.task.branch || '' }}
+
+      - name: Configure git
+        run: |
+          git config user.name "hud-bot"
+          git config user.email "bot@hud.io"
+
+      - name: Create feature branch
+        if: matrix.task.branch && matrix.task.baseBranch
+        run: |
+          git checkout -b "${{ matrix.task.branch }}"
+          git push -u origin "${{ matrix.task.branch }}"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: code-hud/agent-runner
+          path: .agent-runner
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install agent dependencies
+        working-directory: .agent-runner
+        run: npm install --ignore-scripts
+
+      - name: Install Bun
+        if: inputs.mcp-runner == 'bunx'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Resolve Hud tokens (GitHub OIDC)
+        id: hud-tokens
+        run: node .agent-runner/fetch-tokens.js
+        env:
+          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_AUDIENCE: ${{ inputs.hud-audience }}
+
+      - name: Run agent
+        if: matrix.task.type == 'agent'
+        id: agent
+        timeout-minutes: 60
+        run: node .agent-runner/agent.js
+        env:
+          HUD_PROMPT: ${{ matrix.task.prompt }}
+          HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
+          HUD_ACCESS_TOKEN: ${{ steps.hud-tokens.outputs.general_token }}
+          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
+          HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
+          HUD_MCP_VERSION: ${{ inputs.mcp-version }}
+          HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
+          HUD_MODEL: ${{ matrix.task.model }}
+          HUD_AGENT_EXTRA_ENV: ${{ inputs.extra-env }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.langfuse-secret-key }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.langfuse-public-key }}
+          LANGFUSE_BASE_URL: 'https://cloud.langfuse.com'
+
+      - name: Commit and push
+        if: matrix.task.type == 'agent' && matrix.task.branch
+        run: |
+          git add -A -- ':!.agent-runner'
+          if ! git diff --cached --quiet; then
+            git commit -m "workflow step ${{ matrix.task.step_index }}"
+          fi
+          git push origin "${{ matrix.task.branch }}"
+
+      - name: Create PR
+        if: matrix.task.type == 'create_pr'
+        id: create_pr
+        run: |
+          PR_URL=$(gh pr create \
+            --head "${{ matrix.task.branch }}" \
+            --title "${{ matrix.task.title }}" \
+            --body "${{ matrix.task.body }}")
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+
+      - name: Report task result
+        if: always()
+        env:
+          AGENT_RESULT: ${{ steps.agent.outputs.result }}
+          HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
+          TASK_TYPE: ${{ matrix.task.type }}
+          TASK_ID: ${{ matrix.task.id }}
+          BASE_URL: ${{ inputs.base-url }}
+          CREATE_PR_OUTCOME: ${{ steps.create_pr.outcome }}
+          CREATE_PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+        run: |
+          if [ "$TASK_TYPE" = "create_pr" ]; then
+            if [ "$CREATE_PR_OUTCOME" = "success" ] && [ -n "$CREATE_PR_URL" ]; then
+              RESULT=$(jq -nc --arg u "$CREATE_PR_URL" '{status:"finish",result:{pr_url:$u}}')
+            else
+              RESULT=$(jq -nc --arg o "$CREATE_PR_OUTCOME" \
+                '{status:"crash",error:("gh pr create did not succeed: outcome=" + $o)}')
+            fi
+          elif [ -n "$AGENT_RESULT" ]; then
+            RESULT="$AGENT_RESULT"
+          else
+            RESULT='{"status":"crash"}'
+          fi
+          curl -s -f -X POST \
+            -H "Authorization: Bearer $HUD_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$RESULT" \
+            "$BASE_URL/workflow-manager/tasks/$TASK_ID/update"
