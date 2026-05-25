@@ -28,6 +28,14 @@ on:
         required: false
         type: string
         default: ''
+      extra-env:
+        description: |
+          Comma-separated list of additional process.env keys to forward into
+          the Claude Code subprocess on top of the built-in allowlist (PATH,
+          HOME, TMPDIR, USER, SHELL, TERM).
+        required: false
+        type: string
+        default: ''
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
@@ -150,6 +158,7 @@ jobs:
       - name: Run agent
         if: matrix.task.type == 'agent'
         id: agent
+        timeout-minutes: 60
         run: node .agent-runner/agent.js
         env:
           HUD_PROMPT: ${{ matrix.task.prompt }}
@@ -160,6 +169,7 @@ jobs:
           HUD_MCP_VERSION: ${{ inputs.mcp-version }}
           HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
           HUD_MODEL: ${{ matrix.task.model }}
+          HUD_AGENT_EXTRA_ENV: ${{ inputs.extra-env }}
           LANGFUSE_SECRET_KEY: ${{ secrets.langfuse-secret-key }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.langfuse-public-key }}
           LANGFUSE_BASE_URL: 'https://cloud.langfuse.com'
@@ -190,10 +200,19 @@ jobs:
         env:
           AGENT_RESULT: ${{ steps.agent.outputs.result }}
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
+          TASK_TYPE: ${{ matrix.task.type }}
+          TASK_ID: ${{ matrix.task.id }}
+          BASE_URL: ${{ inputs.base-url }}
+          CREATE_PR_OUTCOME: ${{ steps.create_pr.outcome }}
+          CREATE_PR_URL: ${{ steps.create_pr.outputs.pr_url }}
         run: |
-          if [ "${{ matrix.task.type }}" = "create_pr" ]; then
-            PR_URL="${{ steps.create_pr.outputs.pr_url }}"
-            RESULT="{\"status\":\"finish\",\"result\":{\"pr_url\":\"$PR_URL\"}}"
+          if [ "$TASK_TYPE" = "create_pr" ]; then
+            if [ "$CREATE_PR_OUTCOME" = "success" ] && [ -n "$CREATE_PR_URL" ]; then
+              RESULT=$(jq -nc --arg u "$CREATE_PR_URL" '{status:"finish",result:{pr_url:$u}}')
+            else
+              RESULT=$(jq -nc --arg o "$CREATE_PR_OUTCOME" \
+                '{status:"crash",error:("gh pr create did not succeed: outcome=" + $o)}')
+            fi
           elif [ -n "$AGENT_RESULT" ]; then
             RESULT="$AGENT_RESULT"
           else
@@ -203,4 +222,4 @@ jobs:
             -H "Authorization: Bearer $HUD_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$RESULT" \
-            "${{ inputs.base-url }}/workflow-manager/tasks/${{ matrix.task.id }}/update"
+            "$BASE_URL/workflow-manager/tasks/$TASK_ID/update"

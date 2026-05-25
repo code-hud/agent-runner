@@ -1,6 +1,6 @@
 # Hud Agent Runner
 
-A reusable GitHub Actions workflow that polls Hud Workflow Manager for pending tasks, executes them in parallel using claude agent sdk, and reports results back.
+A reusable GitHub Actions workflow that polls Hud Workflow Manager for pending tasks, executes them in parallel using Claude Agent, and reports results back.
 
 ## Authentication
 
