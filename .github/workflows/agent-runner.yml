@@ -47,6 +47,13 @@ on:
       github-token:
         description: 'GitHub token with repo write access for branch/PR operations'
         required: true
+      hud-mcp-key:
+        description: |
+          Optional static Hud MCP key. When provided, it is forwarded to
+          hud-mcp as HUD_MCP_KEY (server-side exchanged via /auth/m2m/login)
+          instead of the GitHub OIDC-derived HUD_ACCESS_TOKEN. The Workflow
+          Manager calls (task fetch/report) still use GitHub OIDC.
+        required: false
       langfuse-secret-key:
         description: 'Langfuse secret key for tracing (optional)'
         required: false
@@ -163,7 +170,11 @@ jobs:
         env:
           HUD_PROMPT: ${{ matrix.task.prompt }}
           HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
-          HUD_ACCESS_TOKEN: ${{ steps.hud-tokens.outputs.general_token }}
+          # When hud-mcp-key is provided, hud-mcp uses HUD_MCP_KEY and the
+          # OIDC-derived HUD_ACCESS_TOKEN is skipped for the MCP. Workflow
+          # Manager calls (fetch/report) keep using the OIDC token above.
+          HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
+          HUD_ACCESS_TOKEN: ${{ secrets.hud-mcp-key == '' && steps.hud-tokens.outputs.general_token || '' }}
           HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
           HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_MCP_VERSION: ${{ inputs.mcp-version }}
