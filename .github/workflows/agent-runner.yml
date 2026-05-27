@@ -71,6 +71,18 @@ on:
 # with `actions: write` permission into an agentic workflow — a security risk
 # since the agent steps could use that token to trigger arbitrary workflow runs.
 
+# Secret-masking note: the GitHub Actions runner scans every write to
+# $GITHUB_OUTPUT and $GITHUB_ENV against its mask set (both explicit secrets
+# and pattern-based auto-detection of JWT / PAT / AWS-key shapes) and drops
+# outputs that match. Pending tasks contain freeform agent text (prompts,
+# bodies, plans, root causes) that regularly trips that check, leaving
+# matrix expansion with an empty input and crashing strategy evaluation.
+#
+# To avoid that, all freeform fields travel via files (tasks.json artifact +
+# /tmp/task-fields/) which the masker does not scan, and only safe structural
+# fields (integer task ids, enum types, branch names, model slugs, file
+# paths) cross $GITHUB_OUTPUT / env: blocks.
+
 jobs:
   fetch-tasks:
     runs-on: ubuntu-latest
@@ -78,8 +90,8 @@ jobs:
       id-token: write
       contents: read
     outputs:
-      tasks: ${{ steps.fetch.outputs.tasks }}
       has_tasks: ${{ steps.fetch.outputs.has_tasks }}
+      task_ids: ${{ steps.fetch.outputs.task_ids }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,13 +113,25 @@ jobs:
         env:
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
         run: |
-          RESPONSE=$(curl -s -f \
+          curl -s -f \
             -H "Authorization: Bearer $HUD_TOKEN" \
-            "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10")
+            "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10" \
+            > tasks.json
 
-          TASK_COUNT=$(echo "$RESPONSE" | jq '. | length')
-          echo "tasks=$(echo "$RESPONSE" | jq -c '.')" >> "$GITHUB_OUTPUT"
+          TASK_COUNT=$(jq '. | length' tasks.json)
+          TASK_IDS=$(jq -c '[.[].id]' tasks.json)
+          # task_ids is an array of integers - cannot match any secret pattern.
+          echo "task_ids=$TASK_IDS" >> "$GITHUB_OUTPUT"
           echo "has_tasks=$([ "$TASK_COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload tasks artifact
+        if: steps.fetch.outputs.has_tasks == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pending-tasks
+          path: tasks.json
+          retention-days: 1
+          if-no-files-found: error
 
   execute-task:
     needs: fetch-tasks
@@ -121,12 +145,47 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        task: ${{ fromJSON(needs.fetch-tasks.outputs.tasks) }}
+        task_id: ${{ fromJSON(needs.fetch-tasks.outputs.task_ids) }}
+    env:
+      TASK_FIELDS_DIR: /tmp/task-fields
     steps:
+      # tasks.json and task-fields live under /tmp so actions/checkout's
+      # default clean does not wipe them when the user repo is checked out
+      # later in the job.
+      - uses: actions/download-artifact@v4
+        with:
+          name: pending-tasks
+          path: /tmp/task-artifact
+
+      - name: Load task fields
+        id: load
+        run: |
+          TASK=$(jq -c --argjson id "${{ matrix.task_id }}" '.[] | select(.id == $id)' /tmp/task-artifact/tasks.json)
+          if [ -z "$TASK" ]; then
+            echo "::error::task_id ${{ matrix.task_id }} not found in tasks.json"
+            exit 1
+          fi
+          mkdir -p "$TASK_FIELDS_DIR"
+          # The whole task object goes to a file; downstream steps (agent.js,
+          # Create PR) pick the fields they need from there. Freeform content
+          # never crosses $GITHUB_OUTPUT or env: blocks (both scanned by the
+          # runner's secret masker).
+          echo "$TASK" > "$TASK_FIELDS_DIR/task.json"
+          : > "$TASK_FIELDS_DIR/result.json"
+          # Structural fields are short, enum-like, or numeric - safe to
+          # surface through $GITHUB_OUTPUT for downstream `if:` and step args.
+          {
+            echo "type=$(jq -r '.type' <<<"$TASK")"
+            echo "branch=$(jq -r '.branch // ""' <<<"$TASK")"
+            echo "base_branch=$(jq -r '.baseBranch // ""' <<<"$TASK")"
+            echo "model=$(jq -r '.model // ""' <<<"$TASK")"
+            echo "step_index=$(jq -r '.step_index // ""' <<<"$TASK")"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.github-token }}
-          ref: ${{ matrix.task.baseBranch || matrix.task.branch || '' }}
+          ref: ${{ steps.load.outputs.base_branch || steps.load.outputs.branch || '' }}
 
       - name: Configure git
         run: |
@@ -134,10 +193,10 @@ jobs:
           git config user.email "bot@hud.io"
 
       - name: Create feature branch
-        if: matrix.task.branch && matrix.task.baseBranch
+        if: steps.load.outputs.branch && steps.load.outputs.base_branch
         run: |
-          git checkout -b "${{ matrix.task.branch }}"
-          git push -u origin "${{ matrix.task.branch }}"
+          git checkout -b "${{ steps.load.outputs.branch }}"
+          git push -u origin "${{ steps.load.outputs.branch }}"
 
       - uses: actions/checkout@v4
         with:
@@ -163,12 +222,18 @@ jobs:
           HUD_AUDIENCE: ${{ inputs.hud-audience }}
 
       - name: Run agent
-        if: matrix.task.type == 'agent'
+        if: steps.load.outputs.type == 'agent'
         id: agent
         timeout-minutes: 60
         run: node .agent-runner/agent.js
         env:
-          HUD_PROMPT: ${{ matrix.task.prompt }}
+          # File-based contract: agent.js reads its prompt / resultSchema from
+          # the task file and writes the result to HUD_RESULT_FILE. Freeform
+          # values never cross $GITHUB_OUTPUT or env: blocks (both scanned by
+          # the runner's secret masker).
+          HUD_TASK_FILE: ${{ env.TASK_FIELDS_DIR }}/task.json
+          HUD_RESULT_FILE: ${{ env.TASK_FIELDS_DIR }}/result.json
+          HUD_MODEL: ${{ steps.load.outputs.model }}
           HUD_ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
           # When hud-mcp-key is provided, hud-mcp uses HUD_MCP_KEY and the
           # OIDC-derived HUD_ACCESS_TOKEN is skipped for the MCP. Workflow
@@ -178,59 +243,58 @@ jobs:
           HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
           HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_MCP_VERSION: ${{ inputs.mcp-version }}
-          HUD_RESULT_SCHEMA: ${{ toJSON(matrix.task.resultSchema) }}
-          HUD_MODEL: ${{ matrix.task.model }}
           HUD_AGENT_EXTRA_ENV: ${{ inputs.extra-env }}
           LANGFUSE_SECRET_KEY: ${{ secrets.langfuse-secret-key }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.langfuse-public-key }}
           LANGFUSE_BASE_URL: 'https://cloud.langfuse.com'
 
       - name: Commit and push
-        if: matrix.task.type == 'agent' && matrix.task.branch
+        if: steps.load.outputs.type == 'agent' && steps.load.outputs.branch
         run: |
           git add -A -- ':!.agent-runner'
           if ! git diff --cached --quiet; then
-            git commit -m "workflow step ${{ matrix.task.step_index }}"
+            git commit -m "workflow step ${{ steps.load.outputs.step_index }}"
           fi
-          git push origin "${{ matrix.task.branch }}"
+          git push origin "${{ steps.load.outputs.branch }}"
 
       - name: Create PR
-        if: matrix.task.type == 'create_pr'
+        if: steps.load.outputs.type == 'create_pr'
         id: create_pr
-        run: |
-          PR_URL=$(gh pr create \
-            --head "${{ matrix.task.branch }}" \
-            --title "${{ matrix.task.title }}" \
-            --body "${{ matrix.task.body }}")
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.github-token }}
+          TASK_FILE: ${{ env.TASK_FIELDS_DIR }}/task.json
+        run: |
+          BODY_FILE=$(mktemp)
+          jq -r '.body // ""' "$TASK_FILE" > "$BODY_FILE"
+          PR_URL=$(gh pr create \
+            --head "${{ steps.load.outputs.branch }}" \
+            --title "$(jq -r '.title // ""' "$TASK_FILE")" \
+            --body-file "$BODY_FILE")
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       - name: Report task result
         if: always()
         env:
-          AGENT_RESULT: ${{ steps.agent.outputs.result }}
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
-          TASK_TYPE: ${{ matrix.task.type }}
-          TASK_ID: ${{ matrix.task.id }}
+          TASK_TYPE: ${{ steps.load.outputs.type }}
+          TASK_ID: ${{ matrix.task_id }}
           BASE_URL: ${{ inputs.base-url }}
           CREATE_PR_OUTCOME: ${{ steps.create_pr.outcome }}
           CREATE_PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+          RESULT_FILE: ${{ env.TASK_FIELDS_DIR }}/result.json
         run: |
           if [ "$TASK_TYPE" = "create_pr" ]; then
             if [ "$CREATE_PR_OUTCOME" = "success" ] && [ -n "$CREATE_PR_URL" ]; then
-              RESULT=$(jq -nc --arg u "$CREATE_PR_URL" '{status:"finish",result:{pr_url:$u}}')
+              jq -nc --arg u "$CREATE_PR_URL" '{status:"finish",result:{pr_url:$u}}' > "$RESULT_FILE"
             else
-              RESULT=$(jq -nc --arg o "$CREATE_PR_OUTCOME" \
-                '{status:"crash",error:("gh pr create did not succeed: outcome=" + $o)}')
+              jq -nc --arg o "$CREATE_PR_OUTCOME" \
+                '{status:"crash",error:("gh pr create did not succeed: outcome=" + $o)}' > "$RESULT_FILE"
             fi
-          elif [ -n "$AGENT_RESULT" ]; then
-            RESULT="$AGENT_RESULT"
-          else
-            RESULT='{"status":"crash"}'
+          elif [ ! -s "$RESULT_FILE" ]; then
+            echo '{"status":"crash"}' > "$RESULT_FILE"
           fi
           curl -s -f -X POST \
             -H "Authorization: Bearer $HUD_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "$RESULT" \
+            --data-binary "@$RESULT_FILE" \
             "$BASE_URL/workflow-manager/tasks/$TASK_ID/update"
