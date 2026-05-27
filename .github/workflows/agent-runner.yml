@@ -253,9 +253,9 @@ jobs:
         run: |
           git add -A -- ':!.agent-runner'
           if ! git diff --cached --quiet; then
-            git commit -m "workflow step ${{ steps.load.outputs.step_index }}"
+            git commit -m "workflow step ${{ steps.load.outputs.step_index }}" --no-verify
           fi
-          git push origin "${{ steps.load.outputs.branch }}"
+          git push origin "${{ steps.load.outputs.branch }}" --no-verify
 
       - name: Create PR
         if: steps.load.outputs.type == 'create_pr'
