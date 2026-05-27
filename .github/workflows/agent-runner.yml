@@ -249,6 +249,7 @@ jobs:
           LANGFUSE_BASE_URL: 'https://cloud.langfuse.com'
 
       - name: Commit and push
+        id: commit_push
         if: steps.load.outputs.type == 'agent' && steps.load.outputs.branch
         run: |
           git add -A -- ':!.agent-runner'
@@ -281,6 +282,7 @@ jobs:
           BASE_URL: ${{ inputs.base-url }}
           CREATE_PR_OUTCOME: ${{ steps.create_pr.outcome }}
           CREATE_PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+          COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
           RESULT_FILE: ${{ env.TASK_FIELDS_DIR }}/result.json
         run: |
           if [ "$TASK_TYPE" = "create_pr" ]; then
@@ -290,6 +292,11 @@ jobs:
               jq -nc --arg o "$CREATE_PR_OUTCOME" \
                 '{status:"crash",error:("gh pr create did not succeed: outcome=" + $o)}' > "$RESULT_FILE"
             fi
+          elif [ "$TASK_TYPE" = "agent" ] && [ "$COMMIT_OUTCOME" = "failure" ]; then
+            # Agent finished but commit/push failed - override the agent's
+            # result so the task is reported as crashed rather than finished.
+            jq -nc --arg o "$COMMIT_OUTCOME" \
+              '{status:"crash",error:("git commit/push did not succeed: outcome=" + $o)}' > "$RESULT_FILE"
           elif [ ! -s "$RESULT_FILE" ]; then
             echo '{"status":"crash"}' > "$RESULT_FILE"
           fi
