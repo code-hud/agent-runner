@@ -105,17 +105,18 @@ jobs:
         id: hud-tokens
         run: node .agent-runner/fetch-tokens.js
         env:
-          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           HUD_AUDIENCE: ${{ inputs.hud-audience }}
 
       - name: Fetch pending tasks
         id: fetch
         env:
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
+          HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
         run: |
           curl -s -f \
             -H "Authorization: Bearer $HUD_TOKEN" \
-            "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10" \
+            "$HUD_BASE_URL/workflow-manager/tasks/pending?limit=10" \
             > tasks.json
 
           TASK_COUNT=$(jq '. | length' tasks.json)
@@ -218,7 +219,7 @@ jobs:
         id: hud-tokens
         run: node .agent-runner/fetch-tokens.js
         env:
-          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           HUD_AUDIENCE: ${{ inputs.hud-audience }}
 
       - name: Run agent
@@ -240,7 +241,7 @@ jobs:
           # Manager calls (fetch/report) keep using the OIDC token above.
           HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
           HUD_ACCESS_TOKEN: ${{ secrets.hud-mcp-key == '' && steps.hud-tokens.outputs.general_token || '' }}
-          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
+          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url || 'https://api-prod.hud.io' }}
           HUD_MCP_BINARY: ${{ github.workspace }}/.agent-runner/mcp.js
           HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_MCP_VERSION: ${{ inputs.mcp-version }}
@@ -248,6 +249,45 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ secrets.langfuse-secret-key }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.langfuse-public-key }}
           LANGFUSE_BASE_URL: 'https://cloud.langfuse.com'
+
+      # The Claude Agent SDK's MCP client does not pipe MCP child stderr to
+      # the parent step, so a crashed `hud-mcp` (e.g. m2m login failure on
+      # startup) is invisible from the agent step's output. Dump the MCP's
+      # own log file and any crash logs it wrote to disk so they show up
+      # in the GitHub Actions log here.
+      - name: Dump hud-mcp logs
+        if: always() && steps.load.outputs.type == 'agent'
+        run: |
+          LOGS_DIR="$HOME/.hud/logs"
+          echo "::group::hud-mcp logs directory listing ($LOGS_DIR)"
+          if [ -d "$LOGS_DIR" ]; then
+            ls -la "$LOGS_DIR"
+          else
+            echo "$LOGS_DIR does not exist — hud-mcp never wrote any log files."
+          fi
+          echo "::endgroup::"
+
+          MCP_LOG="$LOGS_DIR/mcp.log"
+          echo "::group::hud-mcp normal log ($MCP_LOG)"
+          if [ -s "$MCP_LOG" ]; then
+            cat "$MCP_LOG"
+          else
+            echo "$MCP_LOG missing or empty — hud-mcp never reached the winston file transport (likely crashed before/at startup)."
+          fi
+          echo "::endgroup::"
+
+          echo "::group::hud-mcp crash logs ($LOGS_DIR/mcp-crash-*.log)"
+          shopt -s nullglob
+          CRASHES=("$LOGS_DIR"/mcp-crash-*.log)
+          if [ ${#CRASHES[@]} -eq 0 ]; then
+            echo "No mcp-crash-*.log files — hud-mcp's top-level catch never fired."
+          else
+            for f in "${CRASHES[@]}"; do
+              echo "----- $f -----"
+              cat "$f"
+            done
+          fi
+          echo "::endgroup::"
 
       - name: Commit and push
         id: commit_push
@@ -280,7 +320,7 @@ jobs:
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
           TASK_TYPE: ${{ steps.load.outputs.type }}
           TASK_ID: ${{ matrix.task_id }}
-          BASE_URL: ${{ inputs.base-url }}
+          BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           CREATE_PR_OUTCOME: ${{ steps.create_pr.outcome }}
           CREATE_PR_URL: ${{ steps.create_pr.outputs.pr_url }}
           COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
