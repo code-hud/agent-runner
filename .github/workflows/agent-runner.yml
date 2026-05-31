@@ -222,6 +222,54 @@ jobs:
           HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           HUD_AUDIENCE: ${{ inputs.hud-audience }}
 
+      # Probe the bundled MCP binary directly with the same env the Claude
+      # Agent SDK will pass to it later. The SDK does not pipe MCP child
+      # stderr to the parent step, so when the bundled MCP fails to start
+      # (e.g. m2m login error, missing binary, native dep crash) the agent
+      # step just produces output without ever calling a hud tool. Spawning
+      # the MCP here surfaces the failure with full stderr.
+      - name: Smoke-test hud-mcp
+        if: steps.load.outputs.type == 'agent'
+        continue-on-error: true
+        env:
+          HUD_MCP_BINARY: ${{ github.workspace }}/.agent-runner/mcp.js
+          HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
+          HUD_ACCESS_TOKEN: ${{ secrets.hud-mcp-key == '' && steps.hud-tokens.outputs.general_token || '' }}
+          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url || 'https://api-prod.hud.io' }}
+          HUD_MCP_MODE: 'agent-runner'
+        run: |
+          echo "::group::hud-mcp binary check"
+          ls -la "$HUD_MCP_BINARY" || echo "(binary missing)"
+          echo "::endgroup::"
+
+          echo "::group::node $HUD_MCP_BINARY --version"
+          node "$HUD_MCP_BINARY" --version
+          echo "(--version exit: $?)"
+          echo "::endgroup::"
+
+          echo "::group::hud-mcp startup probe (8s timeout, real env, stderr captured)"
+          OUT=$(mktemp)
+          ERR=$(mktemp)
+          set +e
+          timeout 8 node "$HUD_MCP_BINARY" < /dev/null > "$OUT" 2> "$ERR"
+          EC=$?
+          set -e
+          # `timeout 8` exits 124 when it kills the child after the limit —
+          # that's the happy path: the MCP started, finished its m2m
+          # exchange, and was idling on stdio waiting for a client. Any
+          # other non-zero exit means startup itself failed.
+          if [ "$EC" -eq 124 ]; then
+            echo "exit-code: 124 (killed by timeout — MCP appears to have started successfully and was idling on stdio)"
+          else
+            echo "exit-code: $EC"
+          fi
+          echo "----- stdout -----"
+          cat "$OUT"
+          echo "----- stderr -----"
+          cat "$ERR"
+          rm -f "$OUT" "$ERR"
+          echo "::endgroup::"
+
       - name: Run agent
         if: steps.load.outputs.type == 'agent'
         id: agent
