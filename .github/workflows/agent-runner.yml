@@ -14,15 +14,15 @@ on:
         type: string
         default: ''
       mcp-runner:
-        description: 'Command to launch MCP packages: npx or bunx'
+        description: 'Override-only. Command (npx or bunx) used to launch hud-mcp instead of the bundled MCP.'
         required: false
         type: string
-        default: 'npx'
+        default: ''
       mcp-version:
-        description: 'Version (npm dist-tag or version) of hud-mcp to install, e.g. v2 or 1.2.3'
+        description: 'Override-only. Version of hud-mcp to install when mcp-runner is set, e.g. v2 or 1.2.3.'
         required: false
         type: string
-        default: 'v2'
+        default: ''
       hud-audience:
         description: 'OIDC audience for the GitHub→Hud token exchange.'
         required: false
@@ -160,12 +160,12 @@ jobs:
       - name: Load task fields
         id: load
         run: |
+          mkdir -p "$TASK_FIELDS_DIR"
           TASK=$(jq -c --argjson id "${{ matrix.task_id }}" '.[] | select(.id == $id)' /tmp/task-artifact/tasks.json)
           if [ -z "$TASK" ]; then
             echo "::error::task_id ${{ matrix.task_id }} not found in tasks.json"
             exit 1
           fi
-          mkdir -p "$TASK_FIELDS_DIR"
           # The whole task object goes to a file; downstream steps (agent.js,
           # Create PR) pick the fields they need from there. Freeform content
           # never crosses $GITHUB_OUTPUT or env: blocks (both scanned by the
@@ -241,6 +241,7 @@ jobs:
           HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
           HUD_ACCESS_TOKEN: ${{ secrets.hud-mcp-key == '' && steps.hud-tokens.outputs.general_token || '' }}
           HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
+          HUD_MCP_BINARY: ${{ github.workspace }}/.agent-runner/mcp.js
           HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_MCP_VERSION: ${{ inputs.mcp-version }}
           HUD_AGENT_EXTRA_ENV: ${{ inputs.extra-env }}

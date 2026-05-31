@@ -9,7 +9,13 @@ The calling job must grant `permissions: id-token: write`
 
 ## Quick Start
 
-Create a workflow file in your repository (e.g. `.github/workflows/hud-agent-runner.yaml`):
+Create a workflow file in your repository (e.g. `.github/workflows/hud-agent-runner.yaml`).
+
+In the snippet below, replace `<your-workflow-filename>` with the basename of that file — without the leading `.github/workflows/` path and without the `.yaml` extension (the snippet adds it back). For example, if you saved the workflow as `.github/workflows/hud-agent-runner.yaml`, the `gh workflow run` line becomes:
+
+```yaml
+gh workflow run hud-agent-runner.yaml -f remaining_iterations="$REMAINING"
+```
 
 ```yaml
 name: Hud Agent Runner
@@ -61,3 +67,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
 ```
+
