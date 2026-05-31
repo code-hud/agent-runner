@@ -36,6 +36,16 @@ on:
         required: false
         type: string
         default: ''
+      action-ref:
+        description: |
+          Git ref of `code-hud/agent-runner` used to check out the bundled
+          artifacts (`agent.js`, `fetch-tokens.js`, `mcp.js`). Must match
+          the ref the caller used in `uses:` — when calling
+          `agent-runner.yml@rc`, also pass `action-ref: rc`. Defaults to
+          `main` (the stable `@v1` channel).
+        required: false
+        type: string
+        default: 'main'
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
@@ -97,6 +107,7 @@ jobs:
         with:
           repository: code-hud/agent-runner
           path: .agent-runner
+          ref: ${{ inputs.action-ref || 'main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -203,6 +214,7 @@ jobs:
         with:
           repository: code-hud/agent-runner
           path: .agent-runner
+          ref: ${{ inputs.action-ref || 'main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
