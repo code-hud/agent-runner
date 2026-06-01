@@ -14,15 +14,15 @@ on:
         type: string
         default: ''
       mcp-runner:
-        description: 'Command to launch MCP packages: npx or bunx'
+        description: 'Override-only. Command (npx or bunx) used to launch hud-mcp instead of the bundled MCP.'
         required: false
         type: string
-        default: 'npx'
+        default: ''
       mcp-version:
-        description: 'Version (npm dist-tag or version) of hud-mcp to install, e.g. v2 or 1.2.3'
+        description: 'Override-only. Version of hud-mcp to install when mcp-runner is set, e.g. v2 or 1.2.3.'
         required: false
         type: string
-        default: 'v2'
+        default: ''
       hud-audience:
         description: 'OIDC audience for the GitHub→Hud token exchange.'
         required: false
@@ -36,6 +36,16 @@ on:
         required: false
         type: string
         default: ''
+      action-ref:
+        description: |
+          Git ref of `code-hud/agent-runner` used to check out the bundled
+          artifacts (`agent.js`, `fetch-tokens.js`, `mcp.js`). Must match
+          the ref the caller used in `uses:` — when calling
+          `agent-runner.yml@rc`, also pass `action-ref: rc`. Defaults to
+          `main` (the stable `@v1` channel).
+        required: false
+        type: string
+        default: 'main'
     outputs:
       has_tasks:
         description: 'Whether pending tasks were found in this run'
@@ -97,6 +107,7 @@ jobs:
         with:
           repository: code-hud/agent-runner
           path: .agent-runner
+          ref: ${{ inputs.action-ref || 'main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -105,17 +116,18 @@ jobs:
         id: hud-tokens
         run: node .agent-runner/fetch-tokens.js
         env:
-          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           HUD_AUDIENCE: ${{ inputs.hud-audience }}
 
       - name: Fetch pending tasks
         id: fetch
         env:
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
+          HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
         run: |
           curl -s -f \
             -H "Authorization: Bearer $HUD_TOKEN" \
-            "${{ inputs.base-url }}/workflow-manager/tasks/pending?limit=10" \
+            "$HUD_BASE_URL/workflow-manager/tasks/pending?limit=10" \
             > tasks.json
 
           TASK_COUNT=$(jq '. | length' tasks.json)
@@ -160,12 +172,12 @@ jobs:
       - name: Load task fields
         id: load
         run: |
+          mkdir -p "$TASK_FIELDS_DIR"
           TASK=$(jq -c --argjson id "${{ matrix.task_id }}" '.[] | select(.id == $id)' /tmp/task-artifact/tasks.json)
           if [ -z "$TASK" ]; then
             echo "::error::task_id ${{ matrix.task_id }} not found in tasks.json"
             exit 1
           fi
-          mkdir -p "$TASK_FIELDS_DIR"
           # The whole task object goes to a file; downstream steps (agent.js,
           # Create PR) pick the fields they need from there. Freeform content
           # never crosses $GITHUB_OUTPUT or env: blocks (both scanned by the
@@ -202,6 +214,7 @@ jobs:
         with:
           repository: code-hud/agent-runner
           path: .agent-runner
+          ref: ${{ inputs.action-ref || 'main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -218,7 +231,7 @@ jobs:
         id: hud-tokens
         run: node .agent-runner/fetch-tokens.js
         env:
-          HUD_BASE_URL: ${{ inputs.base-url }}
+          HUD_BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           HUD_AUDIENCE: ${{ inputs.hud-audience }}
 
       - name: Run agent
@@ -240,7 +253,8 @@ jobs:
           # Manager calls (fetch/report) keep using the OIDC token above.
           HUD_MCP_KEY: ${{ secrets.hud-mcp-key }}
           HUD_ACCESS_TOKEN: ${{ secrets.hud-mcp-key == '' && steps.hud-tokens.outputs.general_token || '' }}
-          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url }}
+          HUD_MCP_BASE_URL: ${{ inputs.mcp-base-url || inputs.base-url || 'https://api-prod.hud.io' }}
+          HUD_MCP_BINARY: ${{ github.workspace }}/.agent-runner/mcp.js
           HUD_MCP_RUNNER: ${{ inputs.mcp-runner }}
           HUD_MCP_VERSION: ${{ inputs.mcp-version }}
           HUD_AGENT_EXTRA_ENV: ${{ inputs.extra-env }}
@@ -279,7 +293,7 @@ jobs:
           HUD_TOKEN: ${{ steps.hud-tokens.outputs.workflow_manager_token }}
           TASK_TYPE: ${{ steps.load.outputs.type }}
           TASK_ID: ${{ matrix.task_id }}
-          BASE_URL: ${{ inputs.base-url }}
+          BASE_URL: ${{ inputs.base-url || 'https://api-prod.hud.io' }}
           CREATE_PR_OUTCOME: ${{ steps.create_pr.outcome }}
           CREATE_PR_URL: ${{ steps.create_pr.outputs.pr_url }}
           COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
