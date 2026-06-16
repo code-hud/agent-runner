@@ -22,7 +22,7 @@ name: Hud Agent Runner
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       remaining_iterations:
@@ -62,7 +62,9 @@ jobs:
         if: steps.resolve.outputs.remaining > 0
         run: |
           REMAINING=$(( ${{ steps.resolve.outputs.remaining }} - 1 ))
-          gh workflow run <your-workflow-filename>.yaml -f remaining_iterations="$REMAINING"
+          gh workflow run <your-workflow-filename>.yaml \
+            --ref "${{ github.ref_name }}" \
+            -f remaining_iterations="$REMAINING"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
